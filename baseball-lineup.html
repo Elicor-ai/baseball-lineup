@@ -1726,15 +1726,6 @@ function _prBase(title,body){
   .fp{position:absolute;font-size:8px;font-weight:700;text-align:center;line-height:1.2;}
   @media print{@page{margin:10mm}}</style>
   </head><body>${body}
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/baseball-lineup/sw.js')
-      .then(r => console.log('SW registered'))
-      .catch(e => console.log('SW error', e));
-  });
-}
-</script>
 </body></html>`);
   w.document.close();setTimeout(()=>w.print(),500);
 }
@@ -1754,4 +1745,207 @@ function printLineup(){
     const pos=[1,2,3,4,5,6].map(n=>{const pid=(g.defense[n]||{})[Object.keys(g.defense[n]||{}).find(k=>(g.defense[n]||{})[k]===b.playerId)||''];const pp=PB(pid||'');return pp?pp.number:'';});
     // positions par manche pour ce joueur
     const pByI=[1,2,3,4,5,6].map(n=>{const di=g.defense[n]||{};const posId=Object.entries(di).find(([k,v])=>v===b.playerId)?.[0];return posId||'';});
-    bat+=`<tr><td style="font-weight:800;text-align:center">${b.order}</td><td>#${p.number} ${p.name}</td>${pByI.map(v=>`<td s
+    bat+=`<tr><td style="font-weight:800;text-align:center">${b.order}</td><td>#${p.number} ${p.name}</td>${pByI.map(v=>`<td style="text-align:center">${v}</td>`).join('')}</tr>`;
+  });
+  bat+='</tbody></table>';
+
+  // Score
+  _initScore(g);
+  const sc=g.score;const hT=sc.home.reduce((a,b)=>a+b,0);const vT=sc.visit.reduce((a,b)=>a+b,0);
+  let score=`<h2>🏆 Pointage</h2><table><thead><tr><th></th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th><th>R</th></tr></thead><tbody>`;
+  score+=`<tr><td><b>Nous</b></td>${sc.home.map(r=>`<td style="text-align:center">${r}</td>`).join('')}<td style="font-weight:800;text-align:center">${hT}</td></tr>`;
+  score+=`<tr><td><b>${g.opponent||'Adversaire'}</b></td>${sc.visit.map(r=>`<td style="text-align:center">${r}</td>`).join('')}<td style="font-weight:800;text-align:center">${vT}</td></tr>`;
+  score+='</tbody></table>';
+
+  // Résumé positions
+  let res=`<h2>📊 Résumé des positions</h2>
+  <table><thead><tr><th>Pos.</th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th></tr></thead><tbody>`;
+  FP.forEach(pos=>{
+    const cells=[1,2,3,4,5,6].map(n=>{const pid=(g.defense[n]||{})[pos.id];const p=pid?PB(pid):null;return p?`#${p.number} ${p.name}`:'';});
+    if(cells.some(c=>c))res+=`<tr><td><b>${pos.id}</b> ${pos.name}</td>${cells.map(c=>`<td>${c}</td>`).join('')}</tr>`;
+  });
+  res+='</tbody></table>';
+
+  _prBase('Line-up & Résumé',hdr+bat+score+res);
+}
+
+function printTerrain(){
+  const g=CG();
+  const hdr=`<h1>⚾ ${S.team.name||'Baseball Coach'} — Terrain par manche</h1>
+  <div class="sub">${g?`Match du ${g.date}${g.opponent?' vs '+g.opponent:''}`:'Aucun match actif'} &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
+  if(!g){_prBase('Terrain',hdr+'<p>Aucun match actif.</p>');return;}
+
+  // Positions sur terrain (x,y en %) pour les 9 positions
+  const POS_XY={P:[50,60],C:[50,82],1:[72,68],'1B':[72,68],2:[62,44],'2B':[62,44],3:[38,44],'3B':[38,44],SS:[38,44],4:[62,44],5:[38,68],'5':[38,68],6:[28,56],7:[15,22],8:[50,12],9:[85,22]};
+  const _posXY={'P':[50,60],'C':[50,82],'1B':[72,70],'2B':[62,44],'3B':[38,70],'SS':[28,52],'LF':[15,22],'CF':[50,14],'RF':[85,22]};
+
+  let fields='<div style="display:flex;flex-wrap:wrap;gap:8px">';
+  for(let ing=1;ing<=6;ing++){
+    const di=g.defense[ing]||{};
+    // SVG diamant
+    let svg=`<svg viewBox="0 0 260 230" xmlns="http://www.w3.org/2000/svg" width="220" height="195" style="display:block">
+      <!-- terrain -->
+      <rect width="260" height="230" fill="#f0f9e8"/>
+      <!-- ligne de côté -->
+      <polygon points="130,190 220,90 130,10 40,90" fill="#c8e6a0" stroke="#555" stroke-width="1.5"/>
+      <!-- losange (infield) -->
+      <polygon points="130,175 205,105 130,35 55,105" fill="#d4a96a" stroke="#555" stroke-width="1.5"/>
+      <!-- monticule -->
+      <circle cx="130" cy="110" r="12" fill="#c8a06a" stroke="#555" stroke-width="1"/>
+      <!-- marbre -->
+      <polygon points="130,180 122,188 130,195 138,188" fill="#fff" stroke="#333" stroke-width="1"/>
+      <!-- buts -->
+      <rect x="123" y="28" width="14" height="14" fill="#fff" stroke="#333" stroke-width="1"/>
+      <rect x="198" y="98" width="14" height="14" fill="#fff" stroke="#333" stroke-width="1"/>
+      <rect x="48" y="98" width="14" height="14" fill="#fff" stroke="#333" stroke-width="1"/>
+      <text x="130" y="220" text-anchor="middle" font-size="10" font-weight="700" fill="#333">Manche ${ing}</text>`;
+
+    // Positionner chaque joueuse
+    Object.entries(di).forEach(([posId,pid])=>{
+      const p=PB(pid);if(!p)return;
+      const xy=_posXY[posId];if(!xy)return;
+      const cx=Math.round(xy[0]/100*260),cy=Math.round(xy[1]/100*230);
+      svg+=`<circle cx="${cx}" cy="${cy}" r="14" fill="#1e40af" stroke="#fff" stroke-width="2"/>
+      <text x="${cx}" y="${cy-2}" text-anchor="middle" font-size="8" font-weight="700" fill="#fff">${posId}</text>
+      <text x="${cx}" y="${cy+9}" text-anchor="middle" font-size="7" fill="#fff">#${p.number}</text>`;
+    });
+
+    svg+='</svg>';
+    // Légende
+    let leg='<table style="width:220px;font-size:8px;margin-top:2px"><tbody>';
+    Object.entries(di).forEach(([posId,pid])=>{const p=PB(pid);if(p)leg+=`<tr><td style="width:28px;font-weight:700">${posId}</td><td>#${p.number} ${p.name}</td></tr>`;});
+    leg+='</tbody></table>';
+    fields+=`<div style="border:1px solid #ccc;padding:4px;border-radius:4px;margin-bottom:4px">${svg}${leg}</div>`;
+  }
+  fields+='</div>';
+
+  _prBase('Terrain & Positions',hdr+fields);
+}
+
+function printStats(){
+  const hdr=`<h1>⚾ ${S.team.name||'Baseball Coach'} — Statistiques</h1>
+  <div class="sub">Tous les matchs (${S.games.length}) &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
+
+  // Stats au bâton
+  const ps={};
+  S.games.forEach(g=>g.batting.forEach(b=>{
+    if(!ps[b.playerId])ps[b.playerId]={ab:0,h:0,d:0,t:0,hr:0,bb:0,k:0};
+    const s=ps[b.playerId];
+    (b.pas||[]).forEach(pa=>{
+      if(['1B','2B','3B','HR'].includes(pa.result)){s.ab++;s.h++;}
+      if(pa.result==='2B')s.d++;if(pa.result==='3B')s.t++;if(pa.result==='HR')s.hr++;
+      if(pa.result==='BB')s.bb++;
+      if(['OUT','K'].includes(pa.result))s.ab++;if(pa.result==='K')s.k++;
+    });
+  }));
+  let batTbl=`<h2>🏏 Statistiques au bâton</h2>
+  <table><thead><tr><th>Joueuse</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th><th>BB</th><th>K</th><th>MOY</th></tr></thead><tbody>`;
+  S.team.players.filter(p=>ps[p.id]).forEach(p=>{
+    const s=ps[p.id];const avg=s.ab>0?(s.h/s.ab).toFixed(3).replace(/^0/,''):'.000';
+    batTbl+=`<tr><td>#${p.number} ${p.name}</td><td>${s.ab}</td><td>${s.h}</td><td>${s.d}</td><td>${s.t}</td><td>${s.hr}</td><td>${s.bb}</td><td>${s.k}</td><td><b>${avg}</b></td></tr>`;
+  });
+  batTbl+='</tbody></table>';
+
+  // Stats lanceuses
+  const pd={};
+  S.games.forEach(g=>{for(const pid in g.pitches){if(!pd[pid])pd[pid]={B:0,S:0,H:0,I:0};for(const ing in g.pitches[pid]){const d=g.pitches[pid][ing];if(d.ball+d.strike+d.hit>0)pd[pid].I++;pd[pid].B+=d.ball||0;pd[pid].S+=d.strike||0;pd[pid].H+=d.hit||0;}}});
+  let pitTbl=`<h2>⚾ Statistiques lanceuses</h2>
+  <table><thead><tr><th>Joueuse</th><th>Manches</th><th>Balles</th><th>Prises</th><th>Frappées</th><th>Total lancers</th></tr></thead><tbody>`;
+  S.team.players.filter(p=>pd[p.id]).forEach(p=>{
+    const d=pd[p.id];
+    pitTbl+=`<tr><td>#${p.number} ${p.name}</td><td>${d.I}</td><td>${d.B}</td><td>${d.S}</td><td>${d.H}</td><td>${d.B+d.S+d.H}</td></tr>`;
+  });
+  pitTbl+='</tbody></table>';
+
+  _prBase('Statistiques',hdr+batTbl+pitTbl);
+}
+
+// ── EXPORT / IMPORT / SHARE ──
+function doExport(){
+  const b=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download=`baseball-${new Date().toISOString().split('T')[0]}.json`;a.click();
+  showToast('📤 Données exportées');
+}
+
+function doImport(e){
+  const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(!d.team||!d.games)throw 0;S=d;save();showToast('📥 Données importées!');go('equipe');}catch(err){showToast('⚠️ Fichier invalide');}};
+  r.readAsText(f);e.target.value='';
+}
+
+function doShare(){
+  try{
+    const enc=btoa(unescape(encodeURIComponent(JSON.stringify({team:S.team,games:S.games,curGameId:S.curGameId}))));
+    const url=location.href.split('#')[0]+'#d='+enc;
+    if(url.length>500000){showToast('⚠️ Trop de données — utilisez Exporter JSON');return;}
+    window._shareURL=url;
+    const kb=Math.round(url.length/1024);
+    openM('🔗 Partager avec un co-entraîneur','',`<div class="mpad">
+      <div style="font-size:.82rem;color:var(--mut);margin-bottom:14px">
+        Un lien contenant toutes vos données (${kb}KB) sera créé.<br>
+        L'autre personne n'a qu'à l'ouvrir dans son navigateur pour importer.
+      </div>
+      <div style="background:var(--sur2);border-radius:8px;padding:8px;font-size:.65rem;color:var(--mut);word-break:break-all;margin-bottom:12px;max-height:60px;overflow:hidden">${url.slice(0,120)}…</div>
+      <button class="btn bacc" style="width:100%;margin-bottom:8px" onclick="navigator.clipboard.writeText(window._shareURL).then(()=>{closeM();showToast('📋 Lien copié!')}).catch(()=>showToast('⚠️ Copie impossible'))">📋 Copier le lien</button>
+      <button class="btn bsec" style="width:100%" onclick="if(navigator.share){navigator.share({title:'Baseball Coach — Données équipe',url:window._shareURL});closeM();}else{navigator.clipboard.writeText(window._shareURL);closeM();showToast('📋 Lien copié!')}">↗️ Partager via…</button>
+    </div>`);
+  }catch(e){showToast('⚠️ Erreur — utilisez Exporter JSON');}
+}
+
+function chkURL(){
+  const h=location.hash;
+  if(!h.startsWith('#d='))return;
+  try{
+    const d=JSON.parse(decodeURIComponent(escape(atob(h.slice(3)))));
+    if(!d.team||!d.games){history.replaceState(null,'',location.pathname);return;}
+    window._importData=d;
+    openM('📥 Données partagées détectées','',`<div class="mpad" style="text-align:center">
+      <div style="font-size:1.8rem;margin-bottom:8px">📥</div>
+      <div style="font-weight:700;font-size:.95rem;margin-bottom:10px">Données d'équipe reçues</div>
+      <div style="font-size:.82rem;color:var(--mut);background:var(--sur2);border-radius:8px;padding:10px;margin-bottom:16px;text-align:left">
+        🏷️ Équipe : <b>${d.team?.name||'Sans nom'}</b><br>
+        👥 Joueuses : <b>${d.team?.players?.length||0}</b><br>
+        ⚾ Matchs : <b>${d.games?.length||0}</b>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn bsec" style="flex:1" onclick="closeM();history.replaceState(null,'',location.pathname)">Ignorer</button>
+        <button class="btn bacc" style="flex:1" onclick="closeM();S.team=window._importData.team;S.games=window._importData.games;S.curGameId=window._importData.curGameId||null;if(!S.games.find(g=>g.id===S.curGameId))S.curGameId=S.games.length?S.games[S.games.length-1].id:null;save();rRoster();rtopbar();history.replaceState(null,'',location.pathname);showToast('✅ Données importées!')">📥 Importer</button>
+      </div>
+    </div>`);
+  }catch(e){history.replaceState(null,'',location.pathname);}
+}
+
+// ── MODAL ──
+function openM(t,s,body){
+  document.getElementById('mt').textContent=t;
+  document.getElementById('ms').textContent=s;
+  document.getElementById('mb').innerHTML=body;
+  document.getElementById('mbg').classList.add('show');
+}
+function closeM(){document.getElementById('mbg').classList.remove('show');}
+function closeMifBg(e){if(e.target===document.getElementById('mbg'))closeM();}
+
+// ── TOAST ──
+let _tt;
+function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(_tt);_tt=setTimeout(()=>t.classList.remove('show'),1800);}
+
+// ── INIT ──
+load();chkURL();rRoster();rtopbar();updateODBtn();_rSyncDot();
+document.getElementById('pn').addEventListener('keydown',e=>{if(e.key==='Enter')addPlayer();});
+window.addEventListener('load',()=>initMSAL());
+setInterval(save,5000);
+window.addEventListener('beforeunload',()=>{save();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)save();});
+save();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/baseball-lineup/sw.js')
+      .then(r => console.log('SW registered'))
+      .catch(e => console.log('SW error', e));
+  });
+}
+</script>
