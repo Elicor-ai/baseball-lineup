@@ -1,0 +1,25 @@
+{
+  "name": "Baseball Lineup Coach",
+  "short_name": "Baseball",
+  "description": "Gestionnaire de lineup et stats pour entraîneurs de baseball",
+  "start_url": "/baseball-lineup/baseball-lineup.html",
+  "scope": "/baseball-lineup/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1a2332",
+  "theme_color": "#1a2332",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
