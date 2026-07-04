@@ -210,6 +210,7 @@ select option{background:#1e293b;}
   <h1>⚾</h1>
   <div class="topbar-mid">
     <select class="game-sel" id="gsel" onchange="selectGame(this.value)" style="display:none"></select>
+    <button id="gdel-btn" onclick="delGame()" title="Supprimer ce match" style="display:none;background:none;border:none;color:var(--mut);cursor:pointer;font-size:.9rem;padding:2px 6px;flex-shrink:0">🗑</button>
   </div>
   <span id="save-dot" style="font-size:.58rem;color:var(--mut);white-space:nowrap;transition:color .3s;flex-shrink:0">💾</span>
   <span id="sync-dot" onclick="doSyncModal()" title="Sync temps réel" style="font-size:.6rem;color:var(--mut);white-space:nowrap;cursor:pointer;flex-shrink:0;display:none;padding:3px 6px;border-radius:6px;border:1px solid var(--bor)">🔄</span>
@@ -579,9 +580,10 @@ function doSyncModal(){
 function _syncCreate(){
   if(_syncRef)_syncRef.off('value',_onSyncData);
   _syncCode=Math.random().toString(36).slice(2,8).toUpperCase();
+  localStorage.setItem('bbc-sync-code',_syncCode);
   _syncRef=_fbDb.ref('salles/'+_syncCode+'/data');
   _syncPush();
-  _syncRef.on('value',_onSyncData);
+  _syncRef.on('value',_onSyncData,_onSyncError);
   _rSyncDot();
   setTimeout(()=>{
     openM('✅ Salle créée!','',`<div class="mpad" style="text-align:center">
@@ -598,10 +600,16 @@ function _syncJoin(code){
   if(!code||code.length<4){showToast('⚠️ Code invalide');return;}
   if(_syncRef)_syncRef.off('value',_onSyncData);
   _syncCode=code.trim().toUpperCase();
+  localStorage.setItem('bbc-sync-code',_syncCode);
   _syncRef=_fbDb.ref('salles/'+_syncCode+'/data');
-  _syncRef.on('value',_onSyncData);
+  _syncRef.on('value',_onSyncData,_onSyncError);
   _rSyncDot();
   showToast('🔄 Connexion à la salle '+_syncCode+'…');
+}
+
+function _onSyncError(e){
+  console.warn('Sync error',e);
+  showToast('⚠️ Sync interrompue: '+(e&&e.message||'erreur inconnue'));
 }
 
 function _onSyncData(snap){
@@ -635,7 +643,22 @@ function _syncPush(){
 function _syncStop(){
   if(_syncRef){_syncRef.off('value',_onSyncData);_syncRef=null;}
   _syncCode=null;delete S._ts;_lastMyTs=0;
+  localStorage.removeItem('bbc-sync-code');
   _rSyncDot();showToast('⏹ Sync arrêtée');
+}
+
+// Reprend automatiquement une salle de sync active après un rechargement/fermeture de l'app
+function _syncAutoJoin(){
+  const code=localStorage.getItem('bbc-sync-code');
+  if(!code||!_fbConfigured())return;
+  try{
+    if(!firebase.apps.length)firebase.initializeApp(_FB_CFG);
+    _fbDb=firebase.database();
+  }catch(e){console.warn('Firebase auto-init error',e);return;}
+  _syncCode=code;
+  _syncRef=_fbDb.ref('salles/'+_syncCode+'/data');
+  _syncRef.on('value',_onSyncData,_onSyncError);
+  _rSyncDot();
 }
 
 function _rSyncDot(){
@@ -723,12 +746,26 @@ function go(nm){
 
 function rtopbar(){
   const sel=document.getElementById('gsel');
-  if(!S.games.length){sel.style.display='none';return;}
+  const delBtn=document.getElementById('gdel-btn');
+  if(!S.games.length){sel.style.display='none';if(delBtn)delBtn.style.display='none';return;}
   sel.style.display='block';
+  if(delBtn)delBtn.style.display='inline-block';
   sel.innerHTML=S.games.slice().reverse().map(g=>`<option value="${g.id}"${g.id===S.curGameId?' selected':''}>${g.date}${g.opponent?' vs '+g.opponent:''}</option>`).join('');
 }
 
 function selectGame(id){S.curGameId=id;save();const a=document.querySelector('.screen.active');if(a)go(a.id.replace('screen-',''));}
+
+function delGame(){
+  const g=CG();
+  if(!g){showToast('⚠️ Aucun match sélectionné');return;}
+  const lbl=g.date+(g.opponent?' vs '+g.opponent:'');
+  if(!confirm('Supprimer définitivement le match du '+lbl+'?'))return;
+  S.games=S.games.filter(x=>x.id!==g.id);
+  S.curGameId=S.games.length?S.games[S.games.length-1].id:null;
+  save();rtopbar();
+  const a=document.querySelector('.screen.active');if(a)go(a.id.replace('screen-',''));
+  showToast('🗑️ Match supprimé');
+}
 
 // ── NEW GAME ──
 function newGameModal(){
@@ -1932,7 +1969,7 @@ let _tt;
 function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(_tt);_tt=setTimeout(()=>t.classList.remove('show'),1800);}
 
 // ── INIT ──
-load();chkURL();rRoster();rtopbar();updateODBtn();_rSyncDot();
+load();chkURL();rRoster();rtopbar();updateODBtn();_rSyncDot();_syncAutoJoin();
 document.getElementById('pn').addEventListener('keydown',e=>{if(e.key==='Enter')addPlayer();});
 window.addEventListener('load',()=>initMSAL());
 setInterval(save,5000);
