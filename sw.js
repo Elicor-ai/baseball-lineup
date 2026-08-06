@@ -1,4 +1,4 @@
-const CACHE = 'baseball-v1';
+const CACHE = 'baseball-v2';
 const ASSETS = [
   '/baseball-lineup/baseball-lineup.html',
   '/baseball-lineup/manifest.json',
@@ -21,6 +21,19 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  // HTML : réseau d'abord (pour recevoir les mises à jour), cache en secours (hors-ligne)
+  if (e.request.mode === 'navigate' || url.pathname.endsWith('.html')) {
+    e.respondWith(
+      fetch(e.request).then(r => {
+        const copy = r.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy));
+        return r;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+  // Autres ressources (icônes, manifest) : cache d'abord
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
   );
