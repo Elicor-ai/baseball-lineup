@@ -490,7 +490,7 @@ async function syncFromOD(){
     const rts=d._odTs||0, lts=S._odTs||0;
     const newer=rts?rts>lts:d.games.length>=S.games.length;
     if(newer){
-      S=d;
+      S=d;_normGames();
       _lastODJson=_stateJson();
       const j=JSON.stringify(S);
       try{localStorage.setItem('bbc-v5',j);}catch(e){}
@@ -638,7 +638,7 @@ function _onSyncData(snap){
   if(rts>_lastMyTs&&rts>(S._ts||0)){
     const ts=rts;
     delete remote._ts;
-    S=remote;S._ts=ts;
+    S=remote;S._ts=ts;_normGames();
     _lastPushedJson=_stateJson(); // état reçu — inutile de le repousser
     const json=JSON.stringify(S);
     try{localStorage.setItem('bbc-v5',json);}catch(e){}
@@ -705,10 +705,24 @@ function _rSyncDot(){
 const DS={team:{name:'Mon Équipe',players:[]},games:[],curGameId:null,ui:{ing:1,pitId:null,dIng:1,stab:'bat',batIdx:0}};
 let S=JSON.parse(JSON.stringify(DS));
 
+// Normalise l'état : Firebase supprime les objets vides, donc un match créé
+// sans défense perd sa clé 'defense'. On la recrée pour éviter tout plantage.
+function _normGames(){
+  if(!S||typeof S!=='object')return;
+  if(!S.team||typeof S.team!=='object')S.team={name:'Mon Équipe',players:[]};
+  if(!Array.isArray(S.team.players))S.team.players=[];
+  if(!Array.isArray(S.games))S.games=[];
+  S.games.forEach(g=>{
+    if(!g||typeof g!=='object')return;
+    if(!g.defense||typeof g.defense!=='object')g.defense={};
+    if(!Array.isArray(g.batting))g.batting=[];
+    if(!g.score||typeof g.score!=='object')g.score={home:[0,0,0,0,0,0],visit:[0,0,0,0,0,0]};
+  });
+}
 function load(){
   try{
     const d=localStorage.getItem('bbc-v5')||sessionStorage.getItem('bbc-v5-ss');
-    if(d){S=JSON.parse(d);return true;}
+    if(d){S=JSON.parse(d);_normGames();return true;}
   }catch(e){}
   return false;
 }
