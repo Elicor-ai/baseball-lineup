@@ -330,11 +330,15 @@ select option{background:#1e293b;}
 <div class="toast" id="toast"></div>
 
 <script>
+// ── UTILITAIRES SÉCURITÉ / ÉTAT ──
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _stateJson(){const c=JSON.parse(JSON.stringify(S));delete c._ts;delete c._odTs;return JSON.stringify(c);}
+
 // ── ONEDRIVE SYNC ──
 const OD_SCOPE=['Files.ReadWrite'];
 // Fichier dans un dossier normal (partageable) au lieu de approot
 const OD_FILE_OWN='https://graph.microsoft.com/v1.0/me/drive/root:/Baseball Coach/baseball-data.json:/content';
-let _msalApp=null,_odToken=null,_odSaveTimer=null,_odReady=false;
+let _msalApp=null,_odToken=null,_odSaveTimer=null,_odReady=false,_lastODJson=null;
 
 function odClientId(){return localStorage.getItem('bbc-od-clientid')||'e31eae33-3840-478d-ac50-63195a63bf58';}
 
@@ -455,9 +459,9 @@ function odEnterTeamCode(){
 }
 
 function odDisconnect(){
-  try{_msalApp.logoutRedirect();}catch(e){}
-  _odToken=null;_odReady=false;updateODBtn();
+  _odToken=null;_odReady=false;_lastODJson=null;updateODBtn();
   showToast('☁️ OneDrive déconnecté');
+  try{_msalApp.logoutRedirect();}catch(e){}
 }
 
 function updateODBtn(){
@@ -482,8 +486,12 @@ async function syncFromOD(){
     if(r.status===404){await saveToOD();return;}
     if(!r.ok)return;
     const d=await r.json();
-    if(d&&d.team&&d.games&&d.games.length>=S.games.length){
+    if(!d||!d.team||!d.games)return;
+    const rts=d._odTs||0, lts=S._odTs||0;
+    const newer=rts?rts>lts:d.games.length>=S.games.length;
+    if(newer){
       S=d;
+      _lastODJson=_stateJson();
       const j=JSON.stringify(S);
       try{localStorage.setItem('bbc-v5',j);}catch(e){}
       rRoster();rtopbar();
@@ -496,12 +504,17 @@ async function syncFromOD(){
 
 async function saveToOD(){
   if(!_odToken||!_odReady)return;
+  const json=_stateJson();
+  if(json===_lastODJson)return; // rien n'a changé — pas d'écriture
   try{
-    await fetch(odFileUrl(),{
+    const data=JSON.parse(json);
+    data._odTs=Date.now();
+    const r=await fetch(odFileUrl(),{
       method:'PUT',
       headers:{Authorization:'Bearer '+_odToken,'Content-Type':'application/json'},
-      body:JSON.stringify(S)
+      body:JSON.stringify(data)
     });
+    if(r.ok){_lastODJson=json;S._odTs=data._odTs;}
   }catch(e){console.warn('OD save error',e);}
 }
 
@@ -526,7 +539,7 @@ const _FB_CFG = {
   appId:             "1:672639856688:web:1e5d16f00706bbe33c3df5"
 };
 
-let _fbDb=null, _syncCode=null, _syncRef=null, _syncPushT=null, _lastMyTs=0;
+let _fbDb=null, _syncCode=null, _syncRef=null, _syncPushT=null, _lastMyTs=0, _lastPushedJson=null;
 
 function _fbConfigured(){return !_FB_CFG.databaseURL.includes('REMPLACER');}
 
@@ -579,13 +592,18 @@ function doSyncModal(){
 
 function _syncCreate(){
   if(_syncRef)_syncRef.off('value',_onSyncData);
-  _syncCode=Math.random().toString(36).slice(2,8).toUpperCase();
-  localStorage.setItem('bbc-sync-code',_syncCode);
-  _syncRef=_fbDb.ref('salles/'+_syncCode+'/data');
-  _syncPush();
-  _syncRef.on('value',_onSyncData,_onSyncError);
-  _rSyncDot();
-  setTimeout(()=>{
+  const code=Math.random().toString(36).slice(2,8).toUpperCase();
+  const ref=_fbDb.ref('salles/'+code+'/data');
+  ref.once('value').then(snap=>{
+    if(snap.exists()){_syncCreate();return;} // code déjà pris — on regénère
+    _syncCode=code;
+    localStorage.setItem('bbc-sync-code',_syncCode);
+    _syncRef=ref;
+    _lastPushedJson=null;
+    _syncPush();
+    _syncRef.on('value',_onSyncData,_onSyncError);
+    _rSyncDot();
+    setTimeout(()=>{
     openM('✅ Salle créée!','',`<div class="mpad" style="text-align:center">
       <div style="font-size:.75rem;color:var(--mut);margin-bottom:8px">CODE DE SYNCHRONISATION</div>
       <div style="font-size:2.5rem;font-weight:900;letter-spacing:8px;color:#22c55e;margin:12px 0">${_syncCode}</div>
@@ -594,6 +612,7 @@ function _syncCreate(){
       <button class="btn bsec" style="width:100%" onclick="closeM()">OK</button>
     </div>`);
   },150);
+  }).catch(e=>showToast('⚠️ Erreur création salle: '+(e&&e.message||'inconnue')));
 }
 
 function _syncJoin(code){
@@ -620,6 +639,7 @@ function _onSyncData(snap){
     const ts=rts;
     delete remote._ts;
     S=remote;S._ts=ts;
+    _lastPushedJson=_stateJson(); // état reçu — inutile de le repousser
     const json=JSON.stringify(S);
     try{localStorage.setItem('bbc-v5',json);}catch(e){}
     rRoster();rtopbar();
@@ -633,16 +653,19 @@ function _syncPush(){
   if(!_fbDb||!_syncCode||!_syncRef)return;
   clearTimeout(_syncPushT);
   _syncPushT=setTimeout(()=>{
+    if(!_syncRef)return;
+    const json=_stateJson();
+    if(json===_lastPushedJson)return; // rien n'a changé — on ne pousse pas
+    const data=JSON.parse(json);
     _lastMyTs=Date.now();
-    const data=JSON.parse(JSON.stringify(S));
     data._ts=_lastMyTs;
-    _syncRef.set(data).catch(e=>showToast('⚠️ Erreur sync: '+e.message));
+    _syncRef.set(data).then(()=>{_lastPushedJson=json;}).catch(e=>showToast('⚠️ Erreur sync: '+e.message));
   },600);
 }
 
 function _syncStop(){
   if(_syncRef){_syncRef.off('value',_onSyncData);_syncRef=null;}
-  _syncCode=null;delete S._ts;_lastMyTs=0;
+  _syncCode=null;delete S._ts;_lastMyTs=0;_lastPushedJson=null;
   localStorage.removeItem('bbc-sync-code');
   _rSyncDot();showToast('⏹ Sync arrêtée');
 }
@@ -750,7 +773,7 @@ function rtopbar(){
   if(!S.games.length){sel.style.display='none';if(delBtn)delBtn.style.display='none';return;}
   sel.style.display='block';
   if(delBtn)delBtn.style.display='inline-block';
-  sel.innerHTML=S.games.slice().reverse().map(g=>`<option value="${g.id}"${g.id===S.curGameId?' selected':''}>${g.date}${g.opponent?' vs '+g.opponent:''}</option>`).join('');
+  sel.innerHTML=S.games.slice().reverse().map(g=>`<option value="${g.id}"${g.id===S.curGameId?' selected':''}>${g.date}${g.opponent?' vs '+esc(g.opponent):''}</option>`).join('');
 }
 
 function selectGame(id){S.curGameId=id;save();const a=document.querySelector('.screen.active');if(a)go(a.id.replace('screen-',''));}
@@ -758,7 +781,7 @@ function selectGame(id){S.curGameId=id;save();const a=document.querySelector('.s
 function delGame(){
   const g=CG();
   if(!g){showToast('⚠️ Aucun match sélectionné');return;}
-  const lbl=g.date+(g.opponent?' vs '+g.opponent:'');
+  const lbl=g.date+(g.opponent?' vs '+esc(g.opponent):'');
   if(!confirm('Supprimer définitivement le match du '+lbl+'?'))return;
   S.games=S.games.filter(x=>x.id!==g.id);
   S.curGameId=S.games.length?S.games[S.games.length-1].id:null;
@@ -771,7 +794,7 @@ function delGame(){
 function newGameModal(){
   const last=S.games[S.games.length-1];
   openM('Nouveau match','',`<div class="mpad">
-    <div class="form-row"><label>Date</label><input type="date" id="nd" value="${new Date().toISOString().split('T')[0]}"></div>
+    <div class="form-row"><label>Date</label><input type="date" id="nd" value="${new Date().toLocaleDateString('en-CA')}"></div>
     <div class="form-row"><label>Adversaire</label><input type="text" id="no" placeholder="Équipe adverse"></div>
     ${last?`<div style="margin:10px 0 6px;font-size:.75rem;color:var(--mut);font-weight:600">Réutiliser depuis le dernier match:</div>
     <label style="display:flex;align-items:center;gap:8px;font-size:.82rem;padding:4px 0;cursor:pointer"><input type="checkbox" id="nb" style="width:auto"> Copier le line-up (frappe)</label>
@@ -781,7 +804,7 @@ function newGameModal(){
 }
 
 function createGame(){
-  const dt=document.getElementById('nd').value||new Date().toISOString().split('T')[0];
+  const dt=document.getElementById('nd').value||new Date().toLocaleDateString('en-CA');
   const op=document.getElementById('no')?.value.trim()||'';
   const cb=document.getElementById('nb')?.checked;
   const cd=document.getElementById('nd2')?.checked;
@@ -823,7 +846,7 @@ function rResume(){
   const hasTpl=!!(S.team.template&&S.team.template.lineup&&S.team.template.lineup.length);
 
   let h=`<div class="tpl-bar">
-    <div style="font-weight:700;font-size:.85rem;flex:1">📋 Tableau résumé${g?' — '+(g.date||'')+(g.opponent?' vs '+g.opponent:''):' — Modèle saison'}</div>
+    <div style="font-weight:700;font-size:.85rem;flex:1">📋 Tableau résumé${g?' — '+(g.date||'')+(g.opponent?' vs '+esc(g.opponent):''):' — Modèle saison'}</div>
     ${g?`<button class="btn bacc bsm" onclick="saveAsTemplate()" title="Sauvegarder comme modèle de saison">💾 Modèle saison</button>`:''}
     ${hasTpl&&g?`<button class="btn bsec bsm" onclick="applyTemplateToGame()" title="Appliquer le modèle">↺ Modèle</button>`:''}
   </div>
@@ -841,7 +864,7 @@ function rResume(){
       <td><input class="ord-inp" type="number" min="1" max="99" value="${order||''}" placeholder="—"
         onchange="updateResumeOrder('${playerId}',this.value)"
         style="${present?'':'color:var(--mut)'}" /></td>
-      <td class="sum-name" title="${player.name}">#${player.number} ${player.name}</td>`;
+      <td class="sum-name" title="${esc(player.name)}">#${esc(player.number)} ${esc(player.name)}</td>`;
     for(let ing=1;ing<=6;ing++){
       const di=g?(g.defense[ing]||{}):{};
       const posId=Object.entries(di).find(([k,v])=>v===playerId)?.[0];
@@ -1024,9 +1047,9 @@ function rRoster(){
         ${chips||benchChip?`<div class="ppos-chips">${chips}${benchChip}</div>`:'<div class="pstats" style="font-style:italic">Aucune manche enregistrée</div>'}`;
       }
       return`<div class="player-row" style="align-items:flex-start;padding:8px 4px">
-        <div class="nbadge" style="margin-top:2px">${p.number}</div>
+        <div class="nbadge" style="margin-top:2px">${esc(p.number)}</div>
         <div class="pinfo" style="flex:1">
-          <div class="pname">${p.name}</div>
+          <div class="pname">${esc(p.name)}</div>
           ${statsHtml}
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-top:2px">
@@ -1054,16 +1077,16 @@ function rFrappe(){
   const past=S.games.filter(g2=>g2.id!==g.id&&g2.batting.length);
   let h=`<div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div class="ct" style="margin-bottom:0">Ordre de frappe — ${g.date}${g.opponent?' vs '+g.opponent:''}</div>
+      <div class="ct" style="margin-bottom:0">Ordre de frappe — ${g.date}${g.opponent?' vs '+esc(g.opponent):''}</div>
       ${past.length?`<button class="btn bsec bsm" onclick="openCopyBatM()" style="font-size:.65rem">📋 Copier</button>`:''}
     </div>
     ${g.batting.map((b,i)=>{
       const p=PB(b.playerId);if(!p)return'';
       return`<div class="player-row">
         <div class="onum">${i+1}</div>
-        <div class="nbadge" style="font-size:.72rem">${p.number}</div>
+        <div class="nbadge" style="font-size:.72rem">${esc(p.number)}</div>
         <div class="pinfo">
-          <div class="pname">${p.name}</div>
+          <div class="pname">${esc(p.name)}</div>
           <div class="pas">
             ${(b.pas||[]).map((pa,pi)=>`<span class="pac c${pa.result}" onclick="rmPa('${b.playerId}',${pi})" title="M${pa.inning}">${PAL[pa.result]||pa.result}</span>`).join('')}
             <button class="apab" onclick="openPaM('${b.playerId}')">+</button>
@@ -1078,8 +1101,8 @@ function rFrappe(){
     ${notIn.length?`<div class="divl"></div>
       <div class="ct" style="margin-bottom:8px">Remplaçantes disponibles</div>
       ${notIn.map(p=>`<div class="player-row">
-        <div class="nbadge sub">${p.number}</div>
-        <div class="pinfo"><div class="pname" style="color:var(--mut)">${p.name}</div></div>
+        <div class="nbadge sub">${esc(p.number)}</div>
+        <div class="pinfo"><div class="pname" style="color:var(--mut)">${esc(p.name)}</div></div>
         <button class="ibtn" onclick="addBat('${p.id}')" title="Ajouter au line-up">+</button>
       </div>`).join('')}`:''}
   </div>`;
@@ -1095,14 +1118,14 @@ function copyBat(gid){const g=CG();const s=S.games.find(x=>x.id===gid);if(!g||!s
 function openCopyBatM(){
   const past=S.games.filter(g2=>g2.id!==S.curGameId&&g2.batting.length);
   openM('Réutiliser un line-up','Match précédent',past.slice().reverse().map(pg=>`<div class="mrow" onclick="copyBat('${pg.id}');closeM()">
-    <div class="pinfo"><div style="font-weight:600">${pg.date}${pg.opponent?' vs '+pg.opponent:''}</div><div style="font-size:.7rem;color:var(--mut)">${pg.batting.length} frappeuses</div></div>
+    <div class="pinfo"><div style="font-weight:600">${pg.date}${pg.opponent?' vs '+esc(pg.opponent):''}</div><div style="font-size:.7rem;color:var(--mut)">${pg.batting.length} frappeuses</div></div>
     <span style="color:var(--acc)">Copier →</span>
   </div>`).join(''));
 }
 
 function openPaM(pid){
   const p=PB(pid);
-  openM(`Présence au bâton — ${p.name}`,'Manche + résultat',`<div class="mpad">
+  openM(`Présence au bâton — ${esc(p.name)}`,'Manche + résultat',`<div class="mpad">
     <div class="form-row"><label>Manche</label>
       <select id="pa-ing">${[1,2,3,4,5,6,7,8,9].map(n=>`<option value="${n}"${n===S.ui.ing?' selected':''}>${n}</option>`).join('')}</select>
     </div>
@@ -1150,7 +1173,7 @@ function rDef(){
       const pid=di[pos.id];const p=pid?PB(pid):null;
       return`<div class="player-row">
         <div class="nbadge${p?'':' sub'}" style="min-width:36px;border-radius:8px;font-size:.7rem">${pos.id}</div>
-        <div class="pinfo"><div class="pname">${p?`#${p.number} ${p.name}`:'—'}</div><div class="ppos">${pos.name}</div></div>
+        <div class="pinfo"><div class="pname">${p?`#${esc(p.number)} ${esc(p.name)}`:'—'}</div><div class="ppos">${pos.name}</div></div>
         <button class="btn bsec bsm" onclick="openDefM('${pos.id}',${ing})">${p?'Changer':'Assigner'}</button>
       </div>`;}).join('')}
   </div>
@@ -1161,7 +1184,7 @@ function rDef(){
       <div class="ct">🪑 Le Banc — Manche ${ing}</div>
       ${bench.length?bench.map(p=>`<div class="player-row">
         <div class="nbadge sub" style="min-width:36px;border-radius:8px;font-size:1rem">🪑</div>
-        <div class="pinfo"><div class="pname">#${p.number} ${p.name}</div><div class="ppos">Sans position</div></div>
+        <div class="pinfo"><div class="pname">#${esc(p.number)} ${esc(p.name)}</div><div class="ppos">Sans position</div></div>
       </div>`).join(''):'<div class="empty" style="padding:12px 0;font-size:.85rem">Toutes les joueuses ont une position ✅</div>'}
     </div>`;
   })()}`;
@@ -1187,7 +1210,7 @@ function openCpDefM(){
   const past=S.games.filter(g2=>g2.id!==S.curGameId);
   openM('Copier une défense','Match précédent → 6 manches',past.slice().reverse().map(pg=>`
     <div class="mrow" onclick="cpDefFrom('${pg.id}');closeM()">
-      <div class="pinfo"><div style="font-weight:600">${pg.date}${pg.opponent?' vs '+pg.opponent:''}</div><div style="font-size:.7rem;color:var(--mut)">6 manches complètes</div></div>
+      <div class="pinfo"><div style="font-weight:600">${pg.date}${pg.opponent?' vs '+esc(pg.opponent):''}</div><div style="font-size:.7rem;color:var(--mut)">6 manches complètes</div></div>
       <span style="color:var(--acc);font-size:.8rem">Copier →</span>
     </div>`).join('')||'<div class="empty">Aucun match précédent.</div>');
 }
@@ -1214,8 +1237,8 @@ function openDefM(posId,ingN){
       const sel=p.id===curPid;
       const other=!sel&&asgn[p.id]?asgn[p.id]:null;
       return`<div class="mrow" onclick="asgPos('${posId}',${ing},'${p.id}');closeM()">
-        <div class="nbadge">${p.number}</div>
-        <div style="font-weight:600">${p.name}</div>
+        <div class="nbadge">${esc(p.number)}</div>
+        <div style="font-weight:600">${esc(p.name)}</div>
         ${sel?'<span class="mcheck">✓</span>':''}
         ${other?`<span class="abadge">@ ${other}</span>`:''}
       </div>`;}).join('')
@@ -1228,7 +1251,7 @@ function asgPos(posId,ing,pid){
   if(pid)g.defense[ing][posId]=pid;else delete g.defense[ing][posId];
   save();rDef();_syncResume();
   const p=pid?PB(pid):null;
-  showToast(p?`✅ ${p.name} → ${posId}`:`${posId} vidée`);
+  showToast(p?`✅ ${esc(p.name)} → ${posId}`:`${posId} vidée`);
 }
 
 function mkField(di){
@@ -1238,11 +1261,11 @@ function mkField(di){
     const fill=p?'#6366f1':'#1e293b';
     const stroke=p?'#a5b4fc':'#475569';
     const tc=p?'white':'#64748b';
-    const nm=p?p.name.split(' ')[0].slice(0,8):'';
+    const nm=p?esc(p.name.split(' ')[0].slice(0,8)):'';
     return`<g onclick="openDefM('${pos.id}',${S.ui.dIng})" style="cursor:pointer">
       <circle cx="${pos.x}" cy="${pos.y}" r="${R}" fill="${fill}" stroke="${stroke}" stroke-width="${p?2:1.5}" opacity=".95"/>
       <text x="${pos.x}" y="${pos.y-4}" text-anchor="middle" fill="${tc}" font-size="9" font-weight="800" font-family="-apple-system,sans-serif">${pos.id}</text>
-      <text x="${pos.x}" y="${pos.y+7}" text-anchor="middle" fill="${p?'#c7d2fe':tc}" font-size="8" font-weight="700" font-family="-apple-system,sans-serif">${p?'#'+p.number:'+'}</text>
+      <text x="${pos.x}" y="${pos.y+7}" text-anchor="middle" fill="${p?'#c7d2fe':tc}" font-size="8" font-weight="700" font-family="-apple-system,sans-serif">${p?'#'+esc(p.number):'+'}</text>
       ${nm?`<text x="${pos.x}" y="${pos.y+33}" text-anchor="middle" fill="white" font-size="7.5" font-weight="600" font-family="-apple-system,sans-serif" opacity=".85">${nm}</text>`:''}
     </g>`;}).join('');
   return`<svg viewBox="0 0 360 330" xmlns="http://www.w3.org/2000/svg" style="display:block;width:100%">
@@ -1335,14 +1358,19 @@ function _tickTimer(){
 }
 
 // ── LANCEURS — LIMITE HEBDOMADAIRE ──
+function _pDate(s){
+  if(!s)return new Date();
+  const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  return m?new Date(+m[1],+m[2]-1,+m[3],12):new Date(s);
+}
 function _weekStart(dateStr){
-  const d=new Date(dateStr||Date.now());
+  const d=_pDate(dateStr);
   const day=d.getDay();
   d.setDate(d.getDate()-((day+6)%7)); // lundi
   d.setHours(0,0,0,0);return d.getTime();
 }
 function _pitLimit(dateStr){
-  const m=new Date(dateStr||Date.now()).getMonth()+1;
+  const m=_pDate(dateStr).getMonth()+1;
   return m>=7?7:5; // juil-oct=7, reste=5
 }
 function _pitWeekInnings(pid,refDate){
@@ -1350,7 +1378,7 @@ function _pitWeekInnings(pid,refDate){
   const we=ws+7*86400000;
   let cnt=0;
   S.games.forEach(g=>{
-    const gd=new Date(g.date).getTime();
+    const gd=_pDate(g.date).getTime();
     if(gd<ws||gd>=we)return;
     for(let i=1;i<=6;i++){if((g.defense[i]||{})['P']===pid)cnt++;}
   });
@@ -1362,14 +1390,14 @@ function _rPitWeek(){
   const pid=S.ui.pitId;const g=CG();
   if(!pid||!g){el.innerHTML='';return;}
   const p=PB(pid);if(!p){el.innerHTML='';return;}
-  const refDate=g.date||new Date().toISOString().split('T')[0];
+  const refDate=g.date||new Date().toLocaleDateString('en-CA');
   const innings=_pitWeekInnings(pid,refDate);
   const limit=_pitLimit(refDate);
   const pct=Math.min(100,Math.round(innings/limit*100));
   const cls=innings>=limit?'danger':innings>=limit-1?'warn':'ok';
   const fillCls=innings>=limit?'danger':innings>=limit-1?'warn':'';
   const months=['jan','fév','mar','avr','mai','jun','jul','aoû','sep','oct','nov','déc'];
-  const mo=months[new Date(refDate).getMonth()];
+  const mo=months[_pDate(refDate).getMonth()];
   el.innerHTML=`<div class="pit-week-bar">
     <div class="pwb-row">
       <span class="pwb-label">Manches lancées cette semaine (${mo})</span>
@@ -1406,7 +1434,7 @@ function rPartie(){
     }
   }
   const ps=pitchers();
-  document.getElementById('pit-sel').innerHTML='<option value="">— Choisir une lanceuse —</option>'+ps.map(p=>`<option value="${p.id}"${p.id===S.ui.pitId?' selected':''}>#${p.number} ${p.name}</option>`).join('');
+  document.getElementById('pit-sel').innerHTML='<option value="">— Choisir une lanceuse —</option>'+ps.map(p=>`<option value="${p.id}"${p.id===S.ui.pitId?' selected':''}>#${esc(p.number)} ${esc(p.name)}</option>`).join('');
   document.getElementById('ing-disp').textContent=S.ui.ing;
   document.getElementById('ing-lbl').textContent=S.ui.ing;
   _rPitWeek();updPitch();updTot();rScore();_rAbDisplay();
@@ -1515,7 +1543,7 @@ function rScore(){
   const sc=g.score;
   const hTot=sc.home.reduce((a,b)=>a+b,0);
   const vTot=sc.visit.reduce((a,b)=>a+b,0);
-  const opp=g.opponent||'Adversaire';
+  const opp=esc(g.opponent||'Adversaire');
   el.innerHTML=`<div class="card" style="padding:10px 8px">
     <div class="ct" style="margin-bottom:8px">⚾ Pointage</div>
     <div style="overflow-x:auto">
@@ -1651,12 +1679,12 @@ function editPlayer(pid){
   openM('✏️ Modifier la joueuse','',`<div class="mpad">
     <div style="margin-bottom:12px">
       <label style="font-size:.75rem;font-weight:700;color:var(--mut);display:block;margin-bottom:6px">Numéro</label>
-      <input id="ep-num" type="text" maxlength="4" value="${p.number}"
+      <input id="ep-num" type="text" maxlength="4" value="${esc(p.number)}"
         style="width:100%;background:var(--sur2);border:1px solid var(--bor);border-radius:8px;padding:10px;color:var(--txt);font-size:.9rem" />
     </div>
     <div style="margin-bottom:16px">
       <label style="font-size:.75rem;font-weight:700;color:var(--mut);display:block;margin-bottom:6px">Nom</label>
-      <input id="ep-name" type="text" value="${p.name}"
+      <input id="ep-name" type="text" value="${esc(p.name)}"
         style="width:100%;background:var(--sur2);border:1px solid var(--bor);border-radius:8px;padding:10px;color:var(--txt);font-size:.9rem" />
     </div>
     <div style="display:flex;gap:8px">
@@ -1711,7 +1739,7 @@ function rBatSt(){
   }));
   const rows=S.team.players.filter(p=>ps[p.id]).map(p=>{
     const s=ps[p.id];const avg=s.ab>0?(s.h/s.ab).toFixed(3).replace(/^0/,''):'.000';
-    return`<tr><td>${p.name}</td><td>${s.ab}</td><td class="hl">${s.h}</td><td>${s.d}</td><td>${s.t}</td><td>${s.hr}</td><td>${s.bb}</td><td>${s.k}</td><td class="hl">${avg}</td></tr>`;
+    return`<tr><td>${esc(p.name)}</td><td>${s.ab}</td><td class="hl">${s.h}</td><td>${s.d}</td><td>${s.t}</td><td>${s.hr}</td><td>${s.bb}</td><td>${s.k}</td><td class="hl">${avg}</td></tr>`;
   }).join('');
   if(!rows)return'<div class="card"><div class="empty"><div class="ei">📊</div>Aucune stat. Enregistre des présences au bâton dans <strong>Frappe</strong>.</div></div>';
   return`<div class="card" style="overflow-x:auto"><div class="ct">Statistiques au bâton — Tous les matchs</div>
@@ -1726,7 +1754,7 @@ function rPitSt(){
     const d=pd[p.id];const mxI=Math.max(...Object.keys(d).map(Number));
     let tB=0,tS=0,tH=0,rows='';
     for(let i=1;i<=mxI;i++){const x=d[i];if(!x||x.ball+x.strike+x.hit===0)continue;tB+=x.ball;tS+=x.strike;tH+=x.hit;rows+=`<tr><td>M${i}</td><td style="color:#f59e0b;font-weight:700">${x.ball}</td><td style="color:#22c55e;font-weight:700">${x.strike}</td><td style="color:#ef4444;font-weight:700">${x.hit}</td><td>${x.ball+x.strike+x.hit}</td></tr>`;}
-    return`<div class="card"><div class="ct">⚾ #${p.number} ${p.name}</div>
+    return`<div class="card"><div class="ct">⚾ #${esc(p.number)} ${esc(p.name)}</div>
     <table class="stbl"><thead><tr><th>Manche</th><th style="color:#f59e0b">Balles</th><th style="color:#22c55e">Prises</th><th style="color:#ef4444">Frappées</th><th>Total</th></tr></thead>
     <tbody>${rows}<tr style="background:var(--sur2);font-weight:800"><td>TOTAL</td><td style="color:#f59e0b">${tB}</td><td style="color:#22c55e">${tS}</td><td style="color:#ef4444">${tH}</td><td>${tB+tS+tH}</td></tr></tbody></table></div>`;
   }).join('')||'<div class="card"><div class="empty">Aucune lanceuse avec données.</div></div>';
@@ -1769,8 +1797,8 @@ function _prBase(title,body){
 
 function printLineup(){
   const g=CG();
-  const hdr=`<h1>⚾ ${S.team.name||'Baseball Coach'}</h1>
-  <div class="sub">${g?`Match du ${g.date}${g.opponent?' vs '+g.opponent:''}`:'Aucun match actif'} &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
+  const hdr=`<h1>⚾ ${esc(S.team.name||'Baseball Coach')}</h1>
+  <div class="sub">${g?`Match du ${g.date}${g.opponent?' vs '+esc(g.opponent):''}`:'Aucun match actif'} &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
   if(!g){_prBase('Line-up',hdr+'<p>Aucun match actif.</p>');return;}
 
   // Ordre de frappe
@@ -1782,7 +1810,7 @@ function printLineup(){
     const pos=[1,2,3,4,5,6].map(n=>{const pid=(g.defense[n]||{})[Object.keys(g.defense[n]||{}).find(k=>(g.defense[n]||{})[k]===b.playerId)||''];const pp=PB(pid||'');return pp?pp.number:'';});
     // positions par manche pour ce joueur
     const pByI=[1,2,3,4,5,6].map(n=>{const di=g.defense[n]||{};const posId=Object.entries(di).find(([k,v])=>v===b.playerId)?.[0];return posId||'';});
-    bat+=`<tr><td style="font-weight:800;text-align:center">${b.order}</td><td>#${p.number} ${p.name}</td>${pByI.map(v=>`<td style="text-align:center">${v}</td>`).join('')}</tr>`;
+    bat+=`<tr><td style="font-weight:800;text-align:center">${b.order}</td><td>#${esc(p.number)} ${esc(p.name)}</td>${pByI.map(v=>`<td style="text-align:center">${v}</td>`).join('')}</tr>`;
   });
   bat+='</tbody></table>';
 
@@ -1791,14 +1819,14 @@ function printLineup(){
   const sc=g.score;const hT=sc.home.reduce((a,b)=>a+b,0);const vT=sc.visit.reduce((a,b)=>a+b,0);
   let score=`<h2>🏆 Pointage</h2><table><thead><tr><th></th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th><th>R</th></tr></thead><tbody>`;
   score+=`<tr><td><b>Nous</b></td>${sc.home.map(r=>`<td style="text-align:center">${r}</td>`).join('')}<td style="font-weight:800;text-align:center">${hT}</td></tr>`;
-  score+=`<tr><td><b>${g.opponent||'Adversaire'}</b></td>${sc.visit.map(r=>`<td style="text-align:center">${r}</td>`).join('')}<td style="font-weight:800;text-align:center">${vT}</td></tr>`;
+  score+=`<tr><td><b>${esc(g.opponent||'Adversaire')}</b></td>${sc.visit.map(r=>`<td style="text-align:center">${r}</td>`).join('')}<td style="font-weight:800;text-align:center">${vT}</td></tr>`;
   score+='</tbody></table>';
 
   // Résumé positions
   let res=`<h2>📊 Résumé des positions</h2>
   <table><thead><tr><th>Pos.</th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th></tr></thead><tbody>`;
   FP.forEach(pos=>{
-    const cells=[1,2,3,4,5,6].map(n=>{const pid=(g.defense[n]||{})[pos.id];const p=pid?PB(pid):null;return p?`#${p.number} ${p.name}`:'';});
+    const cells=[1,2,3,4,5,6].map(n=>{const pid=(g.defense[n]||{})[pos.id];const p=pid?PB(pid):null;return p?`#${esc(p.number)} ${esc(p.name)}`:'';});
     if(cells.some(c=>c))res+=`<tr><td><b>${pos.id}</b> ${pos.name}</td>${cells.map(c=>`<td>${c}</td>`).join('')}</tr>`;
   });
   res+='</tbody></table>';
@@ -1808,8 +1836,8 @@ function printLineup(){
 
 function printTerrain(){
   const g=CG();
-  const hdr=`<h1>⚾ ${S.team.name||'Baseball Coach'} — Terrain par manche</h1>
-  <div class="sub">${g?`Match du ${g.date}${g.opponent?' vs '+g.opponent:''}`:'Aucun match actif'} &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
+  const hdr=`<h1>⚾ ${esc(S.team.name||'Baseball Coach')} — Terrain par manche</h1>
+  <div class="sub">${g?`Match du ${g.date}${g.opponent?' vs '+esc(g.opponent):''}`:'Aucun match actif'} &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
   if(!g){_prBase('Terrain',hdr+'<p>Aucun match actif.</p>');return;}
 
   // Positions sur terrain (x,y en %) pour les 9 positions
@@ -1844,13 +1872,13 @@ function printTerrain(){
       const cx=Math.round(xy[0]/100*260),cy=Math.round(xy[1]/100*230);
       svg+=`<circle cx="${cx}" cy="${cy}" r="14" fill="#1e40af" stroke="#fff" stroke-width="2"/>
       <text x="${cx}" y="${cy-2}" text-anchor="middle" font-size="8" font-weight="700" fill="#fff">${posId}</text>
-      <text x="${cx}" y="${cy+9}" text-anchor="middle" font-size="7" fill="#fff">#${p.number}</text>`;
+      <text x="${cx}" y="${cy+9}" text-anchor="middle" font-size="7" fill="#fff">#${esc(p.number)}</text>`;
     });
 
     svg+='</svg>';
     // Légende
     let leg='<table style="width:220px;font-size:8px;margin-top:2px"><tbody>';
-    Object.entries(di).forEach(([posId,pid])=>{const p=PB(pid);if(p)leg+=`<tr><td style="width:28px;font-weight:700">${posId}</td><td>#${p.number} ${p.name}</td></tr>`;});
+    Object.entries(di).forEach(([posId,pid])=>{const p=PB(pid);if(p)leg+=`<tr><td style="width:28px;font-weight:700">${posId}</td><td>#${esc(p.number)} ${esc(p.name)}</td></tr>`;});
     leg+='</tbody></table>';
     fields+=`<div style="border:1px solid #ccc;padding:4px;border-radius:4px;margin-bottom:4px">${svg}${leg}</div>`;
   }
@@ -1860,7 +1888,7 @@ function printTerrain(){
 }
 
 function printStats(){
-  const hdr=`<h1>⚾ ${S.team.name||'Baseball Coach'} — Statistiques</h1>
+  const hdr=`<h1>⚾ ${esc(S.team.name||'Baseball Coach')} — Statistiques</h1>
   <div class="sub">Tous les matchs (${S.games.length}) &nbsp;|&nbsp; Imprimé le ${new Date().toLocaleDateString('fr-CA')}</div>`;
 
   // Stats au bâton
@@ -1879,7 +1907,7 @@ function printStats(){
   <table><thead><tr><th>Joueuse</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th><th>BB</th><th>K</th><th>MOY</th></tr></thead><tbody>`;
   S.team.players.filter(p=>ps[p.id]).forEach(p=>{
     const s=ps[p.id];const avg=s.ab>0?(s.h/s.ab).toFixed(3).replace(/^0/,''):'.000';
-    batTbl+=`<tr><td>#${p.number} ${p.name}</td><td>${s.ab}</td><td>${s.h}</td><td>${s.d}</td><td>${s.t}</td><td>${s.hr}</td><td>${s.bb}</td><td>${s.k}</td><td><b>${avg}</b></td></tr>`;
+    batTbl+=`<tr><td>#${esc(p.number)} ${esc(p.name)}</td><td>${s.ab}</td><td>${s.h}</td><td>${s.d}</td><td>${s.t}</td><td>${s.hr}</td><td>${s.bb}</td><td>${s.k}</td><td><b>${avg}</b></td></tr>`;
   });
   batTbl+='</tbody></table>';
 
@@ -1890,7 +1918,7 @@ function printStats(){
   <table><thead><tr><th>Joueuse</th><th>Manches</th><th>Balles</th><th>Prises</th><th>Frappées</th><th>Total lancers</th></tr></thead><tbody>`;
   S.team.players.filter(p=>pd[p.id]).forEach(p=>{
     const d=pd[p.id];
-    pitTbl+=`<tr><td>#${p.number} ${p.name}</td><td>${d.I}</td><td>${d.B}</td><td>${d.S}</td><td>${d.H}</td><td>${d.B+d.S+d.H}</td></tr>`;
+    pitTbl+=`<tr><td>#${esc(p.number)} ${esc(p.name)}</td><td>${d.I}</td><td>${d.B}</td><td>${d.S}</td><td>${d.H}</td><td>${d.B+d.S+d.H}</td></tr>`;
   });
   pitTbl+='</tbody></table>';
 
@@ -1901,7 +1929,7 @@ function printStats(){
 function doExport(){
   const b=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);
-  a.download=`baseball-${new Date().toISOString().split('T')[0]}.json`;a.click();
+  a.download=`baseball-${new Date().toLocaleDateString('en-CA')}.json`;a.click();
   showToast('📤 Données exportées');
 }
 
@@ -1942,7 +1970,7 @@ function chkURL(){
       <div style="font-size:1.8rem;margin-bottom:8px">📥</div>
       <div style="font-weight:700;font-size:.95rem;margin-bottom:10px">Données d'équipe reçues</div>
       <div style="font-size:.82rem;color:var(--mut);background:var(--sur2);border-radius:8px;padding:10px;margin-bottom:16px;text-align:left">
-        🏷️ Équipe : <b>${d.team?.name||'Sans nom'}</b><br>
+        🏷️ Équipe : <b>${esc(d.team?.name||'Sans nom')}</b><br>
         👥 Joueuses : <b>${d.team?.players?.length||0}</b><br>
         ⚾ Matchs : <b>${d.games?.length||0}</b>
       </div>
